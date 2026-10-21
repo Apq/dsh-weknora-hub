@@ -14,7 +14,7 @@
 export const name = 'weknora-hub';
 export const inject = ['tools', 'llm'];
 
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,10 +32,15 @@ const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 // One line per automatic-retrieval attempt. The injected system message is
 // transient (never persisted in the session log), so this file is the only
 // place to check whether a source actually contributed and why it did not.
+const TRACE_MAX_BYTES = 1_000_000;
+
 function trace(cfg, message) {
   if (cfg.trace === false) return;
   const file = cfg.traceFile || join(PLUGIN_DIR, 'weknora-hub-trace.log');
   try {
+    // Keep the file bounded: once it passes ~1 MB, start over rather than grow
+    // without limit across months of turns.
+    if (statSync(file, { throwIfNoEntry: false })?.size > TRACE_MAX_BYTES) writeFileSync(file, '');
     appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
   } catch { /* tracing must never break a request */ }
 }
@@ -257,23 +262,24 @@ function injectBlock(messages, block) {
 }
 
 async function enrich(cfg, options, ctx) {
+  const n = Array.isArray(options?.messages) ? options.messages.length : 0;
   if (!cfg.auto.enabled || !Array.isArray(options?.messages)) {
-    trace(cfg, `skip: auto.enabled=${cfg.auto.enabled} messages=${Array.isArray(options?.messages)}`);
+    trace(cfg, `skip: no messages (auto=${cfg.auto.enabled})`);
     return options;
   }
   if (options.messages.some((m) => typeof m?.content === 'string' && m.content.includes(MARK))) {
-    trace(cfg, 'skip: already injected');
+    trace(cfg, `skip: already injected (msgs=${n})`);
     return options;
   }
   const query = lastUserText(options.messages).trim();
   if (query.length < cfg.auto.minQuery) {
-    trace(cfg, `skip: query too short (${query.length} < ${cfg.auto.minQuery})`);
+    trace(cfg, `skip: query too short ${query.length}<${cfg.auto.minQuery} (msgs=${n})`);
     return options;
   }
 
   const cached = queryCache.get(query);
   if (cached && Date.now() - cached.at < cfg.auto.cacheTtl * 1000) {
-    trace(cfg, `cache hit injected=${cached.block.length}c`);
+    trace(cfg, `cached injected=${cached.block.length}c (msgs=${n})`);
     return cached.block ? { ...options, messages: injectBlock(options.messages, cached.block) } : options;
   }
 
@@ -306,7 +312,7 @@ async function enrich(cfg, options, ctx) {
   if (queryCache.size > 128) for (const k of queryCache.keys().slice(0, 64)) queryCache.delete(k);
   // Ground truth for "did auto-retrieval actually reach the model": the injected
   // system message is transient and never lands in the session log.
-  trace(cfg, `query=${query.length}c hits=[${perSource.join(' ')}]${skipped.length ? ` skipped=[${skipped.join(' ')}]` : ''} injected=${block.length}c`);
+  trace(cfg, `query=${query.length}c hits=[${perSource.join(' ')}]${skipped.length ? ` skipped=[${skipped.join(' ')}]` : ''} injected=${block.length}c (msgs=${n})`);
   if (!block) return options;
   ctx.logger?.info?.(`dsh-weknora-hub: injected ${block.length}c from ${groups.map((g) => `${g.source}:${g.hits.length}`).join(',')}`);
   return { ...options, messages: injectBlock(options.messages, block) };
@@ -536,14 +542,15 @@ export function apply(ctx, config) {
   // inside a generator that yields the original stream.
   const original = svc.streamWithRegistration;
   const hadOwn = Object.hasOwn(svc, 'streamWithRegistration');
-  trace(cfg, `apply: streamWithRegistration typeof=${typeof original} own=${hadOwn}`);
+  // One line at load time: proof that the seam was actually installed. Every
+  // later line is one per retrieval attempt (see enrich), not per stream call.
+  trace(cfg, `apply: seam=${typeof original} own=${hadOwn} auto=${cfg.auto.enabled}`);
   svc.streamWithRegistration = function wrapped(options, prepared) {
     const self = this;
     return (async function* () {
       let effective = options;
       try {
         const messages = options?.messages;
-        trace(cfg, `stream: msgs=${Array.isArray(messages) ? messages.length : 'none'} prepared=${prepared !== undefined}`);
         if (Array.isArray(messages)) {
           const enriched = await enrich(cfg, { messages }, ctx);
           if (enriched.messages !== messages) effective = { ...options, messages: enriched.messages };
