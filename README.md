@@ -75,12 +75,12 @@ pnpm install --dir ~/.dsh/profiles/<profile>
 
 | 工具 | 说明 | 主要参数 |
 |---|---|---|
-| `weknora_search` | 跨所有可读源检索，返回片段与来源文件名 | `query`、`source`（可选，限定单源）、`match_count`（1–20，默认取 `auto.match`） |
-| `weknora_list_sources` | 列出配置的源：类型、是否可写、是否可读、知识库数量、错误信息 | 无 |
-| `weknora_read_document` | 按 `knowledge_id` 读取正文（federation 支持分页；native 返回提示改用检索） | `source`、`knowledge_id`、`offset`、`max_chars` |
-| `weknora_create_note` | 在可写源里创建 Markdown 笔记（仅 `writable: true` 的源会注册此工具） | `source`、`knowledge_base_id`、`title`、`content`、`published` |
+| `weknora_hub_search` | 跨所有可读源检索，返回片段与来源文件名 | `query`、`source`（可选，限定单源）、`match_count`（1–20，默认取 `auto.match`） |
+| `weknora_hub_list_sources` | 列出配置的源：类型、是否可写、是否可读、知识库数量、错误信息 | 无 |
+| `weknora_hub_read_document` | 按 `knowledge_id` 读取正文（federation 支持分页；native 返回提示改用检索） | `source`、`knowledge_id`、`offset`、`max_chars` |
+| `weknora_hub_create_note` | 在可写源里创建 Markdown 笔记（仅 `writable: true` 的源会注册此工具） | `source`、`knowledge_base_id`、`title`、`content`、`published` |
 
-`weknora_create_note` 默认 `published: true` 才会被 WeKnora 解析索引；`published: false` 创建的是草稿，**草稿永远不会进入检索**。
+`weknora_hub_create_note` 默认 `published: true` 才会被 WeKnora 解析索引；`published: false` 创建的是草稿，**草稿永远不会进入检索**。
 
 ## 常见用法
 
@@ -110,7 +110,7 @@ pnpm install --dir ~/.dsh/profiles/<profile>
 | 现象 | 处理 |
 |---|---|
 | 工具列表里没有 `weknora_*` | 检查 profile 的 `bundles` 是否含 `dsh-weknora-hub`，以及 `pnpm install` 是否成功 |
-| 有工具但检索结果为空 | 调 `weknora_list_sources` 看 `readable` 与 `error`；密钥/地址错会显示在 `error` |
+| 有工具但检索结果为空 | 调 `weknora_hub_list_sources` 看 `readable` 与 `error`；密钥/地址错会显示在 `error` |
 | 自动注入没生效 | 看日志是否有 `dsh-weknora-hub: injected ...`；`auto.enabled` 是否为 true、用户消息是否短于 `minQuery` |
 | 改了配置没变化 | 配置热读；改 `index.js` 需要完全重启 DSH |
 | 源暂时故障后一直不恢复 | 验证结果缓存 `verifyTtlMs`，等过期或重启 DSH 立即重验 |

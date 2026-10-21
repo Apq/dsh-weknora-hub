@@ -247,7 +247,7 @@ async function enrich(cfg, options, ctx) {
 function createTools(cfg) {
   const definitions = [];
   const mk = (suffix, description, parameters, output, execute, options = {}) => ({
-    name: `weknora_${suffix}`,
+    name: `weknora_hub_${suffix}`,
     description,
     parameters,
     timeoutMs: options.timeoutMs ?? cfg.requestTimeoutMs,
