@@ -513,20 +513,42 @@ export function apply(ctx, config) {
   for (const definition of createTools(cfg)) ctx.tools.register(definition);
 
   const svc = ctx.llm;
-  const original = svc.streamWithRegistration;
-  const hadOwn = Object.hasOwn(svc, 'streamWithRegistration');
-  // streamWithRegistration is synchronous and its result is consumed as an async
-  // iterable, so hand back a generator immediately and await enrichment inside.
-  svc.streamWithRegistration = function wrapped(options, prepared) {
-    const self = this;
-    return (async function* () {
-      // A prepared call was validated against its resolved config; rewriting
-      // messages there would trip INVALID_PREPARED_CALL.
-      const effective = prepared === undefined ? await enrich(cfg, options, ctx) : options;
-      yield* original.call(self, effective, prepared);
-    })();
+  // The agent loop resolves a call through prepareCall() and then dispatches the
+  // prepared handle; streamWithRegistration() only sees already-resolved config,
+  // where rewriting messages trips INVALID_PREPARED_CALL. So enrichment happens
+  // in prepareCall, before messages are frozen into the resolved config — the
+  // only seam that reaches real agent turns.
+  const original = svc.prepareCall;
+  const hadOwn = Object.hasOwn(svc, 'prepareCall');
+  svc.prepareCall = async function wrapped(config, signal, configure) {
+    let effective = config;
+    try {
+      const messages = config?.messages;
+      if (Array.isArray(messages) && !isInternalRequest(messages)) {
+        const enriched = await enrich(cfg, { messages }, ctx);
+        if (enriched.messages !== messages) effective = { ...config, messages: enriched.messages };
+      }
+    } catch (err) {
+      ctx.logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
+    }
+    return original.call(this, effective, signal, configure);
   };
-  ctx.on('dispose', () => { if (hadOwn) svc.streamWithRegistration = original; else delete svc.streamWithRegistration; });
+  ctx.on('dispose', () => { if (hadOwn) svc.prepareCall = original; else delete svc.prepareCall; });
 
   ctx.logger?.info(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
+}
+
+// Title generation, summarization and other harness-internal prompts must not
+// carry retrieved passages: they are not user questions and the extra text only
+// pollutes their output.
+const INTERNAL_SYSTEM = /(summari[sz]|compaction|generate (a|the) title|title for this conversation|标题)/i;
+
+function isInternalRequest(messages) {
+  return messages.some((m) => {
+    if (m?.role !== 'system') return false;
+    const content = typeof m.content === 'string'
+      ? m.content
+      : Array.isArray(m.content) ? m.content.map((p) => p?.text ?? '').join(' ') : '';
+    return INTERNAL_SYSTEM.test(content);
+  });
 }
