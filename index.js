@@ -14,14 +14,31 @@
 export const name = 'weknora-hub';
 export const inject = ['tools', 'llm'];
 
+import { appendFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const DEFAULTS = {
   requestTimeoutMs: 20000,
   verifyTtlMs: 600000,
-  verifyTimeoutMs: 8000,
+  verifyFailureTtlMs: 30000,
+  verifyTimeoutMs: 15000,
   auto: { enabled: true, match: 4, maxChars: 6000, minQuery: 4, cacheTtl: 300 },
 };
 
 const MARK = '【知识库自动检索结果】';
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+
+// One line per automatic-retrieval attempt. The injected system message is
+// transient (never persisted in the session log), so this file is the only
+// place to check whether a source actually contributed and why it did not.
+function trace(cfg, message) {
+  if (cfg.trace === false) return;
+  const file = cfg.traceFile || join(PLUGIN_DIR, 'weknora-hub-trace.log');
+  try {
+    appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
+  } catch { /* tracing must never break a request */ }
+}
 
 function text(value) {
   return [{ type: 'text', text: String(value) }];
@@ -82,14 +99,31 @@ function resolveConfig(config = {}) {
     sources,
     requestTimeoutMs: Number(config.requestTimeoutMs ?? DEFAULTS.requestTimeoutMs),
     verifyTtlMs: Number(config.verifyTtlMs ?? DEFAULTS.verifyTtlMs),
+    verifyFailureTtlMs: Number(config.verifyFailureTtlMs ?? DEFAULTS.verifyFailureTtlMs),
     verifyTimeoutMs: Number(config.verifyTimeoutMs ?? DEFAULTS.verifyTimeoutMs),
+    trace: config.trace !== false,
+    traceFile: config.traceFile ? String(config.traceFile) : '',
     auto: { ...DEFAULTS.auto, ...(config.auto ?? {}) },
   };
 }
 
 // ---------------------------------------------------------------- verification
 
-const verifyCache = new Map(); // id -> { ok, at, kbCount, error }
+const verifyCache = new Map(); // id -> { ok, at, kbCount, error, sig }
+
+// A source's verification is only valid for the configuration it was probed
+// under. Editing baseUrl/apiKey/writable/knowledgeBaseIds must invalidate the
+// cached verdict immediately, otherwise a fixed config keeps reporting the old
+// failure until its TTL expires.
+function sourceSignature(source) {
+  return JSON.stringify([
+    source.type,
+    source.baseUrl,
+    source.apiKey,
+    source.writable,
+    source.knowledgeBaseIds,
+  ]);
+}
 
 async function probeSource(source, cfg) {
   const headers = source.type === 'federation'
@@ -104,14 +138,21 @@ async function probeSource(source, cfg) {
 }
 
 async function ensureVerified(source, cfg, { force = false } = {}) {
+  const sig = sourceSignature(source);
   const cached = verifyCache.get(source.id);
-  if (!force && cached && Date.now() - cached.at < cfg.verifyTtlMs) return cached;
+  if (!force && cached && cached.sig === sig) {
+    // A healthy verdict is cached for verifyTtlMs; a failure only for
+    // verifyFailureTtlMs so a transient outage recovers on its own instead of
+    // hiding the source for the whole success TTL.
+    const ttl = cached.ok ? cfg.verifyTtlMs : cfg.verifyFailureTtlMs;
+    if (Date.now() - cached.at < ttl) return cached;
+  }
   let entry;
   try {
     const kbCount = await probeSource(source, cfg);
-    entry = { ok: true, at: Date.now(), kbCount, error: '' };
+    entry = { ok: true, at: Date.now(), kbCount, error: '', sig };
   } catch (err) {
-    entry = { ok: false, at: Date.now(), kbCount: 0, error: String(err?.message ?? err) };
+    entry = { ok: false, at: Date.now(), kbCount: 0, error: String(err?.message ?? err), sig };
   }
   verifyCache.set(source.id, entry);
   return entry;
@@ -223,20 +264,35 @@ async function enrich(cfg, options, ctx) {
   }
 
   const readable = [];
+  const skipped = [];
   for (const source of cfg.sources) {
     const state = await ensureVerified(source, cfg);
     if (state.ok) readable.push(source);
-    else ctx.logger?.warn?.(`dsh-weknora-hub: source ${source.id} unreadable: ${state.error}`);
+    else {
+      skipped.push(`${source.id}:${state.error}`);
+      ctx.logger?.warn?.(`dsh-weknora-hub: source ${source.id} unreadable: ${state.error}`);
+    }
   }
   const groups = [];
+  const perSource = [];
   const settled = await Promise.allSettled(readable.map((s) => searchSource(s, query, cfg.auto.match, cfg)));
   settled.forEach((r, i) => {
-    if (r.status === 'fulfilled' && r.value.length) groups.push({ source: readable[i].id, hits: r.value });
-    else if (r.status === 'rejected') ctx.logger?.warn?.(`dsh-weknora-hub: search ${readable[i].id} failed: ${r.reason?.message ?? r.reason}`);
+    if (r.status === 'fulfilled' && r.value.length) {
+      groups.push({ source: readable[i].id, hits: r.value });
+      perSource.push(`${readable[i].id}:${r.value.length}`);
+    } else if (r.status === 'rejected') {
+      perSource.push(`${readable[i].id}:ERR(${r.reason?.message ?? r.reason})`);
+      ctx.logger?.warn?.(`dsh-weknora-hub: search ${readable[i].id} failed: ${r.reason?.message ?? r.reason}`);
+    } else {
+      perSource.push(`${readable[i].id}:0`);
+    }
   });
   const block = formatBlock(groups);
   queryCache.set(query, { at: Date.now(), block });
   if (queryCache.size > 128) for (const k of queryCache.keys().slice(0, 64)) queryCache.delete(k);
+  // Ground truth for "did auto-retrieval actually reach the model": the injected
+  // system message is transient and never lands in the session log.
+  trace(cfg, `query=${query.length}c hits=[${perSource.join(' ')}]${skipped.length ? ` skipped=[${skipped.join(' ')}]` : ''} injected=${block.length}c`);
   if (!block) return options;
   ctx.logger?.info?.(`dsh-weknora-hub: injected ${block.length}c from ${groups.map((g) => `${g.source}:${g.hits.length}`).join(',')}`);
   return { ...options, messages: injectBlock(options.messages, block) };
@@ -260,7 +316,7 @@ function createTools(cfg) {
   definitions.push(mk(
     'list_sources',
     'List configured knowledge-base sources with their verified readability, type, knowledge-base count and whether they accept writes.',
-    { type: 'object', properties: {}, additionalProperties: false },
+    { type: 'object', properties: { refresh: { type: 'boolean', description: 'Re-probe every source now instead of using the cached readability verdict.' } }, additionalProperties: false },
     {
       schema: {
         type: 'object',
@@ -282,10 +338,10 @@ function createTools(cfg) {
         additionalProperties: false,
       },
     },
-    async () => {
+    async (args) => {
       const out = [];
       for (const s of cfg.sources) {
-        const v = await ensureVerified(s, cfg);
+        const v = await ensureVerified(s, cfg, { force: args?.refresh === true });
         out.push({ id: s.id, type: s.type, writable: s.writable, readable: v.ok, knowledge_bases: v.kbCount, error: v.error });
       }
       return { sources: out };
