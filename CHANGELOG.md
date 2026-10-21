@@ -12,4 +12,4 @@
 - 配置指纹：源配置变化立即失效缓存，无需重启
 - `weknora_hub_list_sources` 支持 `refresh: true` 强制重验
 - 自动检索落盘日志（`traceFile`），记录各源命中数与被跳过原因
-- 每个源可配 `timeoutMs` 覆盖全局超时；全局默认由 20 秒放宽到 30 秒（含验证探测）
+- 每个源可配 `timeoutMs` 覆盖全局超时；全局 `requestTimeoutMs` 默认 45 秒（工具与检索），`verifyTimeoutMs` 默认 30 秒

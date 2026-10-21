@@ -48,7 +48,7 @@ pnpm install --dir ~/.dsh/profiles/<profile>
         baseUrl: http://192.168.0.16:18083
         apiKey: xxxxxxxx
         writable: false
-    requestTimeoutMs: 30000          # 单次检索超时（全局默认 30 秒，可被源的 timeoutMs 覆盖）
+    requestTimeoutMs: 45000          # 单次检索/工具超时（全局默认 45 秒，可被源的 timeoutMs 覆盖）
     verifyTtlMs: 600000              # 可读性验证成功后的缓存时长（默认 10 分钟）
     verifyFailureTtlMs: 30000        # 验证失败后的缓存时长（默认 30 秒，到期自动重试）
     traceFile: ''                    # 可选：自动检索落盘日志路径；默认写在插件目录 weknora-hub-trace.log

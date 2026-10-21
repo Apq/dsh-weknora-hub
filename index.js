@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULTS = {
-  requestTimeoutMs: 30000,
+  requestTimeoutMs: 45000,
   verifyTtlMs: 600000,
   verifyFailureTtlMs: 30000,
   verifyTimeoutMs: 30000,
