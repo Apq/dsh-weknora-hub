@@ -1,0 +1,40 @@
+{
+  "name": "dsh-weknora-hub",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "DeepSeek Harness plugin: one hub for multiple WeKnora knowledge bases — per-source writable flag, cached readability verification, automatic retrieval injection, plus search/read/write tools.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "weknora",
+    "knowledge-base",
+    "rag"
+  ],
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Apq/dsh-weknora-hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Apq/dsh-weknora-hub/issues"
+  },
+  "homepage": "https://github.com/Apq/dsh-weknora-hub#readme",
+  "engines": {
+    "node": ">=22.15"
+  }
+}
