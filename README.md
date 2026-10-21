@@ -95,13 +95,34 @@ pnpm install --dir ~/.dsh/profiles/<profile>
 
 ## 常见用法
 
-**只读个人库 + 公司库，全部自动检索**
+**个人库可写 + 公司库只读，两个源都自动检索**（推荐配置）
 
 ```yaml
 - id: weknora-hub
   config:
     sources:
-      - { id: personal, type: native, baseUrl: https://weknora.example.com, apiKey: sk-xxx }
+      - id: personal            # 个人库：native，可写
+        type: native
+        baseUrl: https://weknora.example.com
+        apiKey: sk-xxx
+        writable: true          # 只有它为 true，才会注册 weknora_hub_create_note
+        knowledgeBaseIds: []
+      - id: corp                # 公司库：联邦只读，写不了
+        type: federation
+        baseUrl: http://192.168.0.16:18083
+        apiKey: xxx
+        writable: false
+```
+
+`type: federation` 天然只读——即使写 `writable: true` 也不会生效，写入工具只对 `type: native` 且 `writable: true` 的源注册。
+
+**两个源都只读**
+
+```yaml
+- id: weknora-hub
+  config:
+    sources:
+      - { id: personal, type: native, baseUrl: https://weknora.example.com, apiKey: sk-xxx, writable: false }
       - { id: corp, type: federation, baseUrl: http://192.168.0.16:18083, apiKey: xxx }
 ```
 
