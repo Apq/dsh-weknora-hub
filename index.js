@@ -527,30 +527,35 @@ export function apply(ctx, config) {
   for (const definition of createTools(cfg)) ctx.tools.register(definition);
 
   const svc = ctx.llm;
-  // The agent loop resolves a call through prepareCall() and then dispatches the
-  // prepared handle; streamWithRegistration() only sees already-resolved config,
-  // where rewriting messages trips INVALID_PREPARED_CALL. So enrichment happens
-  // in prepareCall, before messages are frozen into the resolved config — the
-  // only seam that reaches real agent turns.
-  const original = svc.prepareCall;
-  const hadOwn = Object.hasOwn(svc, 'prepareCall');
-  trace(cfg, `apply: prepareCall typeof=${typeof original} own=${hadOwn}`);
-  svc.prepareCall = async function wrapped(config, signal, configure) {
-    let effective = config;
-    try {
-      const messages = config?.messages;
-      trace(cfg, `prepareCall: msgs=${Array.isArray(messages) ? messages.length : 'none'} model=${config?.provider ?? '?'}/${config?.model ?? '?'}`);
-      if (Array.isArray(messages)) {
-        const enriched = await enrich(cfg, { messages }, ctx);
-        if (enriched.messages !== messages) effective = { ...config, messages: enriched.messages };
+  // The seam is streamWithRegistration: prepareCall's config carries no messages
+  // (only provider/model/limits), and the agent passes the assembled messages to
+  // the prepared handle's stream(options). callConfigEquals compares only
+  // provider/model/reasoningEffort/temperature/maxTokens/stop — never messages —
+  // so rewriting options.messages here does not trip INVALID_PREPARED_CALL.
+  // streamWithRegistration returns an async iterable, so enrichment is awaited
+  // inside a generator that yields the original stream.
+  const original = svc.streamWithRegistration;
+  const hadOwn = Object.hasOwn(svc, 'streamWithRegistration');
+  trace(cfg, `apply: streamWithRegistration typeof=${typeof original} own=${hadOwn}`);
+  svc.streamWithRegistration = function wrapped(options, prepared) {
+    const self = this;
+    return (async function* () {
+      let effective = options;
+      try {
+        const messages = options?.messages;
+        trace(cfg, `stream: msgs=${Array.isArray(messages) ? messages.length : 'none'} prepared=${prepared !== undefined}`);
+        if (Array.isArray(messages)) {
+          const enriched = await enrich(cfg, { messages }, ctx);
+          if (enriched.messages !== messages) effective = { ...options, messages: enriched.messages };
+        }
+      } catch (err) {
+        trace(cfg, `error: ${err?.message ?? err}`);
+        ctx.logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
       }
-    } catch (err) {
-      trace(cfg, `error: ${err?.message ?? err}`);
-      ctx.logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
-    }
-    return original.call(this, effective, signal, configure);
+      yield* original.call(self, effective, prepared);
+    })();
   };
-  ctx.on('dispose', () => { if (hadOwn) svc.prepareCall = original; else delete svc.prepareCall; });
+  ctx.on('dispose', () => { if (hadOwn) svc.streamWithRegistration = original; else delete svc.streamWithRegistration; });
 
   ctx.logger?.info(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
 }
