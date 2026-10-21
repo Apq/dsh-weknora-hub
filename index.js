@@ -257,13 +257,23 @@ function injectBlock(messages, block) {
 }
 
 async function enrich(cfg, options, ctx) {
-  if (!cfg.auto.enabled || !Array.isArray(options?.messages)) return options;
-  if (options.messages.some((m) => typeof m?.content === 'string' && m.content.includes(MARK))) return options;
+  if (!cfg.auto.enabled || !Array.isArray(options?.messages)) {
+    trace(cfg, `skip: auto.enabled=${cfg.auto.enabled} messages=${Array.isArray(options?.messages)}`);
+    return options;
+  }
+  if (options.messages.some((m) => typeof m?.content === 'string' && m.content.includes(MARK))) {
+    trace(cfg, 'skip: already injected');
+    return options;
+  }
   const query = lastUserText(options.messages).trim();
-  if (query.length < cfg.auto.minQuery) return options;
+  if (query.length < cfg.auto.minQuery) {
+    trace(cfg, `skip: query too short (${query.length} < ${cfg.auto.minQuery})`);
+    return options;
+  }
 
   const cached = queryCache.get(query);
   if (cached && Date.now() - cached.at < cfg.auto.cacheTtl * 1000) {
+    trace(cfg, `cache hit injected=${cached.block.length}c`);
     return cached.block ? { ...options, messages: injectBlock(options.messages, cached.block) } : options;
   }
 
@@ -524,15 +534,18 @@ export function apply(ctx, config) {
   // only seam that reaches real agent turns.
   const original = svc.prepareCall;
   const hadOwn = Object.hasOwn(svc, 'prepareCall');
+  trace(cfg, `apply: prepareCall typeof=${typeof original} own=${hadOwn}`);
   svc.prepareCall = async function wrapped(config, signal, configure) {
     let effective = config;
     try {
       const messages = config?.messages;
-      if (Array.isArray(messages) && !isInternalRequest(messages)) {
+      trace(cfg, `prepareCall: msgs=${Array.isArray(messages) ? messages.length : 'none'} model=${config?.provider ?? '?'}/${config?.model ?? '?'}`);
+      if (Array.isArray(messages)) {
         const enriched = await enrich(cfg, { messages }, ctx);
         if (enriched.messages !== messages) effective = { ...config, messages: enriched.messages };
       }
     } catch (err) {
+      trace(cfg, `error: ${err?.message ?? err}`);
       ctx.logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
     }
     return original.call(this, effective, signal, configure);
@@ -542,17 +555,9 @@ export function apply(ctx, config) {
   ctx.logger?.info(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
 }
 
-// Title generation, summarization and other harness-internal prompts must not
-// carry retrieved passages: they are not user questions and the extra text only
-// pollutes their output.
-const INTERNAL_SYSTEM = /(summari[sz]|compaction|generate (a|the) title|title for this conversation|标题)/i;
-
-function isInternalRequest(messages) {
-  return messages.some((m) => {
-    if (m?.role !== 'system') return false;
-    const content = typeof m.content === 'string'
-      ? m.content
-      : Array.isArray(m.content) ? m.content.map((p) => p?.text ?? '').join(' ') : '';
-    return INTERNAL_SYSTEM.test(content);
-  });
-}
+// Harness-internal prompts (title generation, compaction summarization) are
+// deliberately NOT filtered: telling them apart from a real turn means matching
+// the system prompt, which embeds the skill/tool catalog and routinely contains
+// words like "summarize" — that filter silently skipped every real turn. The
+// cost of an extra block on an internal call is a few KB; the cost of a missed
+// turn is a wrong answer.
