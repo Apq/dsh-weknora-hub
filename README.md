@@ -41,17 +41,18 @@ pnpm install --dir ~/.dsh/profiles/<profile>
         apiKey: sk-xxxx              # native 用 X-API-Key；federation 用 Bearer
         writable: true               # 仅 native 且显式为 true 才注册写入工具
         knowledgeBaseIds: []         # 空数组 = 全部知识库（自动发现新库）
+        timeoutMs: 30000             # 可选：该源单独的超时；不写则用全局 requestTimeoutMs
         defaultKnowledgeBaseId: ''   # 可选：kb_create_note 未指定库时的默认值
       - id: corp
         type: federation
         baseUrl: http://192.168.0.16:18083
         apiKey: xxxxxxxx
         writable: false
-    requestTimeoutMs: 20000          # 单次检索超时
+    requestTimeoutMs: 30000          # 单次检索超时（全局默认 30 秒，可被源的 timeoutMs 覆盖）
     verifyTtlMs: 600000              # 可读性验证成功后的缓存时长（默认 10 分钟）
     verifyFailureTtlMs: 30000        # 验证失败后的缓存时长（默认 30 秒，到期自动重试）
     traceFile: ''                    # 可选：自动检索落盘日志路径；默认写在插件目录 weknora-hub-trace.log
-    verifyTimeoutMs: 8000            # 验证探测超时
+    verifyTimeoutMs: 30000           # 验证探测超时（同样可被源的 timeoutMs 覆盖）
     auto:
       enabled: true                  # 关掉就只保留工具、不再自动注入
       match: 4                       # 每个源最多取几条

@@ -19,10 +19,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULTS = {
-  requestTimeoutMs: 20000,
+  requestTimeoutMs: 30000,
   verifyTtlMs: 600000,
   verifyFailureTtlMs: 30000,
-  verifyTimeoutMs: 15000,
+  verifyTimeoutMs: 30000,
   auto: { enabled: true, match: 4, maxChars: 6000, minQuery: 4, cacheTtl: 300 },
 };
 
@@ -92,6 +92,8 @@ function resolveConfig(config = {}) {
       writable: type === 'native' && entry.writable === true,
       knowledgeBaseIds: Array.isArray(entry.knowledgeBaseIds) ? entry.knowledgeBaseIds : [],
       defaultKnowledgeBaseId: entry.defaultKnowledgeBaseId ? String(entry.defaultKnowledgeBaseId) : '',
+      // Per-source override; falls back to the global requestTimeoutMs.
+      timeoutMs: entry.timeoutMs === undefined ? undefined : Number(entry.timeoutMs),
     });
   }
   if (violations.length) throw new Error(`dsh-weknora-hub configuration is invalid:\n  - ${violations.join('\n  - ')}`);
@@ -122,6 +124,7 @@ function sourceSignature(source) {
     source.apiKey,
     source.writable,
     source.knowledgeBaseIds,
+    source.timeoutMs,
   ]);
 }
 
@@ -132,7 +135,7 @@ async function probeSource(source, cfg) {
   const url = source.type === 'federation'
     ? `${source.baseUrl}/api/v1/knowledge-bases`
     : `${nativeRoot(source.baseUrl)}/knowledge-bases`;
-  const body = await fetchJson(url, { headers }, cfg.verifyTimeoutMs);
+  const body = await fetchJson(url, { headers }, source.timeoutMs ?? cfg.verifyTimeoutMs);
   const list = body.data ?? body.items ?? body.knowledge_bases ?? [];
   return Array.isArray(list) ? list.length : 0;
 }
@@ -170,15 +173,16 @@ function hitText(h) {
 async function searchNative(source, query, match, cfg) {
   const root = nativeRoot(source.baseUrl);
   const headers = { 'Content-Type': 'application/json', 'X-API-Key': source.apiKey };
+  const timeout = source.timeoutMs ?? cfg.requestTimeoutMs;
   let ids = source.knowledgeBaseIds;
   if (!ids.length) {
-    const listed = await fetchJson(`${root}/knowledge-bases`, { headers }, cfg.requestTimeoutMs);
+    const listed = await fetchJson(`${root}/knowledge-bases`, { headers }, timeout);
     ids = (listed.data ?? listed.items ?? []).map((k) => (k.knowledge_base ?? k).id).filter(Boolean).slice(0, 12);
   }
   const results = await Promise.allSettled(ids.map((id) => fetchJson(
     `${root}/knowledge-bases/${id}/hybrid-search`,
     { method: 'POST', headers, body: JSON.stringify({ query_text: query, match_count: match }) },
-    cfg.requestTimeoutMs,
+    timeout,
   )));
   const hits = [];
   for (const r of results) if (r.status === 'fulfilled') hits.push(...(r.value?.data ?? []));
@@ -193,7 +197,7 @@ async function searchFederation(source, query, match, cfg) {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${source.apiKey}` },
       body: JSON.stringify({ query, match_count: match }),
     },
-    Math.max(cfg.requestTimeoutMs, 25000),
+    source.timeoutMs ?? cfg.requestTimeoutMs,
   );
   return (body.data ?? []).slice(0, match);
 }
@@ -454,7 +458,7 @@ function createTools(cfg) {
           ...(args.offset === undefined ? {} : { offset: args.offset }),
           ...(args.max_chars === undefined ? {} : { max_chars: args.max_chars }),
         }),
-      }, Math.max(cfg.requestTimeoutMs, 30000));
+      }, source.timeoutMs ?? Math.max(cfg.requestTimeoutMs, 30000));
       return { source: source.id, content: String(body.content ?? ''), truncated: Boolean(body.truncated), ...(body.next_offset === undefined ? {} : { next_offset: body.next_offset }) };
     },
   ));
@@ -496,7 +500,7 @@ function createTools(cfg) {
             content: args.content,
             status: args.published === false ? 'draft' : 'publish',
           }),
-        }, Math.max(cfg.requestTimeoutMs, 60000));
+        }, source.timeoutMs ?? Math.max(cfg.requestTimeoutMs, 60000));
         const data = body.data ?? body;
         return { source: source.id, knowledge_id: String(data.id ?? data.knowledge_id ?? ''), status: String(data.parse_status ?? data.status ?? 'unknown') };
       },
