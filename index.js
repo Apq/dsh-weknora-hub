@@ -3,7 +3,9 @@
  *   - multiple sources, each declared in config with its own type/keys/writable flag
  *   - readability is verified once and cached (TTL), never re-probed per request
  *   - automatic retrieval: every model request is enriched from all readable sources
- *   - tools: kb_search / kb_list_sources / kb_read_document / kb_create_note (writable only)
+ *   - a standing system-prompt section tells the model when to use the tools
+ *   - tools: weknora_hub_search / weknora_hub_list_sources / weknora_hub_read_document /
+ *     weknora_hub_create_note (writable sources only)
  *
  * Source types:
  *   native      — a WeKnora deployment (/api/v1), may be writable
@@ -142,7 +144,14 @@ async function probeSource(source, cfg) {
     : `${nativeRoot(source.baseUrl)}/knowledge-bases`;
   const body = await fetchJson(url, { headers }, source.timeoutMs ?? cfg.verifyTimeoutMs);
   const list = body.data ?? body.items ?? body.knowledge_bases ?? [];
-  return Array.isArray(list) ? list.length : 0;
+  // Keep the identities, not just the count: create_note needs a real
+  // knowledge_base_id, and the count alone forces the model to invent one.
+  return (Array.isArray(list) ? list : [])
+    .map((kb) => ({
+      id: String(kb.id ?? kb.knowledge_base_id ?? ''),
+      name: String(kb.name ?? kb.title ?? ''),
+    }))
+    .filter((kb) => kb.id);
 }
 
 async function ensureVerified(source, cfg, { force = false } = {}) {
@@ -157,10 +166,10 @@ async function ensureVerified(source, cfg, { force = false } = {}) {
   }
   let entry;
   try {
-    const kbCount = await probeSource(source, cfg);
-    entry = { ok: true, at: Date.now(), kbCount, error: '', sig };
+    const knowledgeBases = await probeSource(source, cfg);
+    entry = { ok: true, at: Date.now(), kbCount: knowledgeBases.length, knowledgeBases, error: '', sig };
   } catch (err) {
-    entry = { ok: false, at: Date.now(), kbCount: 0, error: String(err?.message ?? err), sig };
+    entry = { ok: false, at: Date.now(), kbCount: 0, knowledgeBases: [], error: String(err?.message ?? err), sig };
   }
   verifyCache.set(source.id, entry);
   return entry;
@@ -220,6 +229,7 @@ function formatBlock(groups) {
     '2) 相关时以此为准，不得与片段冲突；',
     '3) 回答末尾必须单列一行「来源：」并写出实际用到的文件名（多个用、分隔）；一个都没用到就写「来源：无」；',
     '4) 资料不足要明说，禁止编造。',
+    '5) 片段不够回答时，用 weknora_hub_search 换更精确的措辞再检索（可指定 source、提高 match_count）。',
   ];
   let used = 0;
   for (const { source, hits } of groups) {
@@ -335,7 +345,7 @@ function createTools(cfg) {
 
   definitions.push(mk(
     'list_sources',
-    'List configured knowledge-base sources with their verified readability, type, knowledge-base count and whether they accept writes.',
+    'List every configured knowledge-base source with its type, readability, write support, and the id and name of each knowledge base it exposes. Call this first when you need a knowledge_base_id for weknora_hub_create_note, or when the user asks which knowledge bases exist.',
     { type: 'object', properties: { refresh: { type: 'boolean', description: 'Re-probe every source now instead of using the cached readability verdict.' } }, additionalProperties: false },
     {
       schema: {
@@ -347,7 +357,12 @@ function createTools(cfg) {
               type: 'object',
               properties: {
                 id: { type: 'string' }, type: { type: 'string' }, writable: { type: 'boolean' },
-                readable: { type: 'boolean' }, knowledge_bases: { type: 'integer' }, error: { type: 'string' },
+                readable: { type: 'boolean' },
+                knowledge_bases: {
+                  type: 'array',
+                  items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } }, required: ['id', 'name'], additionalProperties: false },
+                },
+                error: { type: 'string' },
               },
               required: ['id', 'type', 'writable', 'readable', 'knowledge_bases', 'error'],
               additionalProperties: false,
@@ -362,7 +377,7 @@ function createTools(cfg) {
       const out = [];
       for (const s of cfg.sources) {
         const v = await ensureVerified(s, cfg, { force: args?.refresh === true });
-        out.push({ id: s.id, type: s.type, writable: s.writable, readable: v.ok, knowledge_bases: v.kbCount, error: v.error });
+        out.push({ id: s.id, type: s.type, writable: s.writable, readable: v.ok, knowledge_bases: v.knowledgeBases ?? [], error: v.error });
       }
       return { sources: out };
     },
@@ -371,7 +386,7 @@ function createTools(cfg) {
 
   definitions.push(mk(
     'search',
-    `Search every readable configured knowledge base and return matching passages with their source file names. Sources: ${sourceIds.join(', ')}.`,
+    `Search the configured knowledge bases (sources: ${sourceIds.join(', ')}) and return matching passages with their source file names. Call this before answering any question that may already be documented — project history, past decisions, internal procedures, runbooks, domain facts, or prior troubleshooting — and again with sharper terms whenever an automatic-retrieval block in the conversation is missing, thin, or does not answer the question. Each source is searched independently; a failing source is skipped instead of failing the call.`,
     {
       type: 'object',
       properties: {
@@ -436,7 +451,7 @@ function createTools(cfg) {
 
   definitions.push(mk(
     'read_document',
-    'Read a knowledge document body by knowledge_id (as returned by kb_search). Federation sources support paging; native sources return their stored passages.',
+    'Read one knowledge document in full by knowledge_id, as returned by weknora_hub_search. Federation sources support offset paging; native sources answer with guidance instead of body text — for those, re-run weknora_hub_search with a larger match_count.',
     {
       type: 'object',
       properties: {
@@ -463,7 +478,7 @@ function createTools(cfg) {
       const source = cfg.sources.find((s) => s.id === args.source);
       if (!source) throw new Error(`unknown source "${args.source}"`);
       if (source.type !== 'federation') {
-        return { source: source.id, content: '该源为 native 类型，暂不支持按 knowledge_id 读取正文；请用 kb_search 提高 match_count 获取更多片段。', truncated: false };
+        return { source: source.id, content: '该源为 native 类型，暂不支持按 knowledge_id 读取正文；请用 weknora_hub_search 提高 match_count 获取更多片段。', truncated: false };
       }
       const body = await fetchJson(`${source.baseUrl}/read_document`, {
         method: 'POST',
@@ -483,12 +498,12 @@ function createTools(cfg) {
   if (writable.length) {
     definitions.push(mk(
       'create_note',
-      `Create a Markdown note in a writable knowledge base. Writable sources: ${writable.map((s) => s.id).join(', ')}.`,
+      `Create a Markdown note in a writable knowledge base (writable sources: ${writable.map((s) => s.id).join(', ')}). Use this to persist conclusions, procedures, or reference facts that later sessions should find. Call weknora_hub_list_sources first and take a real knowledge_base_id from its sources[].knowledge_bases[].id — never invent one, and never pass a knowledge_id returned by search.`,
       {
         type: 'object',
         properties: {
           source: { type: 'string', description: `Writable source id (one of: ${writable.map((s) => s.id).join(', ')})` },
-          knowledge_base_id: { type: 'string', description: 'Target knowledge base id (see kb_list_sources + kb_search results).' },
+          knowledge_base_id: { type: 'string', description: 'Target knowledge base id from weknora_hub_list_sources sources[].knowledge_bases[].id (not a search result knowledge_id).' },
           title: { type: 'string', description: 'Note title; becomes the document name.' },
           content: { type: 'string', description: 'Markdown body.' },
           published: { type: 'boolean', description: 'Default true: publish so WeKnora parses and indexes it. A draft is never indexed.' },
@@ -532,6 +547,34 @@ export function apply(ctx, config) {
   const cfg = resolveConfig(config);
   for (const definition of createTools(cfg)) ctx.tools.register(definition);
 
+  // Standing job rule: without it the model only reaches for these tools when
+  // the user names the knowledge base, and an auto-retrieval block alone reads
+  // as pasted context rather than a capability it may query again.
+  try {
+    const systemPrompt = ctx.get('systemPrompt');
+    const writable = cfg.sources.filter((s) => s.writable).map((s) => s.id);
+    if (systemPrompt?.section) {
+      systemPrompt.section({
+        name: 'weknora-hub',
+        order: 5600,
+        text: [
+          '## 知识库（WeKnora）',
+          `本会话接入了团队知识库，源：${cfg.sources.map((s) => `${s.id}${s.writable ? '（可写）' : '（只读）'}`).join('、')}。`,
+          '- 回答涉及本项目历史、既有决策、内部文档、操作手册、排障经验或领域事实的问题前，先用 `weknora_hub_search` 检索；对话里出现的「【知识库自动检索结果】」只是首轮自动检索，不够时自己换词再搜。',
+          '- 需要整篇正文时用 `weknora_hub_read_document`（联邦源才支持按 knowledge_id 读全文）。',
+          writable.length ? '- 值得长期留存的结论用 `weknora_hub_create_note` 写回；`knowledge_base_id` 必须取自 `weknora_hub_list_sources` 的 `knowledge_bases[].id`，不得编造。' : '',
+          '- 引用知识库内容时按检索块要求单列「来源：」。',
+        ].filter(Boolean).join('\n'),
+      });
+      trace(cfg, 'apply: system-prompt section registered');
+    } else {
+      trace(cfg, 'apply: systemPrompt service unavailable; section skipped');
+    }
+  } catch (err) {
+    ctx.logger?.warn?.(`dsh-weknora-hub: prompt section skipped: ${err?.message ?? err}`);
+    trace(cfg, `apply: prompt section failed: ${err?.message ?? err}`);
+  }
+
   const svc = ctx.llm;
   // The seam is streamWithRegistration: prepareCall's config carries no messages
   // (only provider/model/limits), and the agent passes the assembled messages to
@@ -564,7 +607,7 @@ export function apply(ctx, config) {
   };
   ctx.on('dispose', () => { if (hadOwn) svc.streamWithRegistration = original; else delete svc.streamWithRegistration; });
 
-  ctx.logger?.info(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
+  ctx.logger?.info?.(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
 }
 
 // Harness-internal prompts (title generation, compaction summarization) are
