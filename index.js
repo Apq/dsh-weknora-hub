@@ -273,8 +273,12 @@ function injectBlock(messages, block) {
 
 async function enrich(cfg, options, ctx) {
   const n = Array.isArray(options?.messages) ? options.messages.length : 0;
-  if (!cfg.auto.enabled || !Array.isArray(options?.messages)) {
-    trace(cfg, `skip: no messages (auto=${cfg.auto.enabled})`);
+  if (!cfg.auto.enabled) {
+    trace(cfg, 'skip: auto retrieval disabled (config auto.enabled=false)');
+    return options;
+  }
+  if (!Array.isArray(options?.messages)) {
+    trace(cfg, 'skip: no messages array to enrich');
     return options;
   }
   if (options.messages.some((m) => typeof m?.content === 'string' && m.content.includes(MARK))) {
@@ -319,7 +323,10 @@ async function enrich(cfg, options, ctx) {
   });
   const block = formatBlock(groups);
   queryCache.set(query, { at: Date.now(), block });
-  if (queryCache.size > 128) for (const k of queryCache.keys().slice(0, 64)) queryCache.delete(k);
+  // Map.keys() is an iterator, not an array: spreading it is what makes the
+  // eviction work. Calling .slice() on the iterator threw on every cache-miss
+  // request once the cache filled, which silently dropped auto retrieval.
+  if (queryCache.size > 128) for (const k of [...queryCache.keys()].slice(0, 64)) queryCache.delete(k);
   // Ground truth for "did auto-retrieval actually reach the model": the injected
   // system message is transient and never lands in the session log.
   trace(cfg, `query=${query.length}c hits=[${perSource.join(' ')}]${skipped.length ? ` skipped=[${skipped.join(' ')}]` : ''} injected=${block.length}c (msgs=${n})`);
@@ -583,29 +590,59 @@ export function apply(ctx, config) {
   // so rewriting options.messages here does not trip INVALID_PREPARED_CALL.
   // streamWithRegistration returns an async iterable, so enrichment is awaited
   // inside a generator that yields the original stream.
-  const original = svc.streamWithRegistration;
-  const hadOwn = Object.hasOwn(svc, 'streamWithRegistration');
-  // One line at load time: proof that the seam was actually installed. Every
-  // later line is one per retrieval attempt (see enrich), not per stream call.
-  trace(cfg, `apply: seam=${typeof original} own=${hadOwn} auto=${cfg.auto.enabled}`);
-  svc.streamWithRegistration = function wrapped(options, prepared) {
-    const self = this;
-    return (async function* () {
-      let effective = options;
-      try {
-        const messages = options?.messages;
-        if (Array.isArray(messages)) {
-          const enriched = await enrich(cfg, { messages }, ctx);
-          if (enriched.messages !== messages) effective = { ...options, messages: enriched.messages };
+  //
+  // One wrapper per llm service, shared across re-applies: DSH re-applies this
+  // plugin when the profile config changes, and wrapping again on every apply
+  // stacked layers whose earlier copies kept running with their own stale `cfg`.
+  // That is why `auto: { enabled: false }` used to keep injecting until a full
+  // process restart. A re-apply now only refreshes the shared state below.
+  const STATE = Symbol.for('dsh-weknora-hub.seam');
+  let state = svc[STATE];
+  if (state === undefined) {
+    const original = svc.streamWithRegistration;
+    const hadOwn = Object.hasOwn(svc, 'streamWithRegistration');
+    const restore = () => {
+      if (hadOwn) svc.streamWithRegistration = original;
+      else delete svc.streamWithRegistration;
+    };
+    state = { cfg, ctx, generation: 1, restore };
+    svc[STATE] = state;
+    // One line at load time: proof that the seam was actually installed. Every
+    // later line is one per retrieval attempt (see enrich), not per stream call.
+    trace(cfg, `apply: seam=${typeof original} own=${hadOwn} auto=${cfg.auto.enabled}`);
+    svc.streamWithRegistration = function wrapped(options, prepared) {
+      const self = this;
+      return (async function* () {
+        const active = svc[STATE];
+        let effective = options;
+        try {
+          const messages = options?.messages;
+          if (active && Array.isArray(messages)) {
+            const enriched = await enrich(active.cfg, { messages }, active.ctx);
+            if (enriched.messages !== messages) effective = { ...options, messages: enriched.messages };
+          }
+        } catch (err) {
+          const activeCfg = active?.cfg ?? cfg;
+          trace(activeCfg, `error: ${err?.message ?? err}`);
+          (active?.ctx ?? ctx).logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
         }
-      } catch (err) {
-        trace(cfg, `error: ${err?.message ?? err}`);
-        ctx.logger?.warn?.(`dsh-weknora-hub: enrich skipped: ${err?.message ?? err}`);
-      }
-      yield* original.call(self, effective, prepared);
-    })();
-  };
-  ctx.on('dispose', () => { if (hadOwn) svc.streamWithRegistration = original; else delete svc.streamWithRegistration; });
+        yield* original.call(self, effective, prepared);
+      })();
+    };
+  } else {
+    state.cfg = cfg;
+    state.ctx = ctx;
+    state.generation += 1;
+    trace(cfg, `apply: seam reused (config reload) auto=${cfg.auto.enabled}`);
+  }
+  const myGeneration = state.generation;
+  ctx.on('dispose', () => {
+    // A newer apply owns the seam now; tearing it down here would disable the
+    // live configuration that replaced this instance.
+    if (svc[STATE] !== state || state.generation !== myGeneration) return;
+    state.restore();
+    delete svc[STATE];
+  });
 
   ctx.logger?.info?.(`dsh-weknora-hub: sources=${cfg.sources.map((s) => `${s.id}(${s.type}${s.writable ? ',w' : ''})`).join(',')} auto=${cfg.auto.enabled}`);
 }

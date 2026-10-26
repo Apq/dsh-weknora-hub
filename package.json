@@ -1,6 +1,6 @@
 {
   "name": "dsh-weknora-hub",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "DeepSeek Harness plugin: one hub for multiple WeKnora knowledge bases — per-source writable flag, cached readability verification, automatic retrieval injection, plus search/read/write tools.",
   "keywords": [

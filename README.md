@@ -54,14 +54,25 @@ pnpm install --dir ~/.dsh/profiles/<profile>
     traceFile: ''                    # 可选：自动检索落盘日志路径；默认写在插件目录 weknora-hub-trace.log
     verifyTimeoutMs: 30000           # 验证探测超时（同样可被源的 timeoutMs 覆盖）
     auto:
-      enabled: true                  # 关掉就只保留工具、不再自动注入
+      enabled: true                  # 默认 true：请求前自动检索并注入；false = 只保留工具、不再自动注入
       match: 4                       # 每个源最多取几条
       maxChars: 6000                 # 注入块总字数上限
       minQuery: 4                    # 用户消息短于此长度不检索
       cacheTtl: 300                  # 相同问题的检索结果缓存（秒）
 ```
 
-改配置后 DSH 会按需重读，无需重启；**改 `index.js` 必须重启**。
+`auto` 整块不写时按默认值处理（即 `enabled: true`），只写 `auto: { enabled: false }` 也能与默认值合并。
+
+**开关语义（`auto.enabled`）**：
+
+| 状态 | 请求前自动注入 | `weknora_hub_*` 工具 | 系统提示里的常驻检索指令 |
+|---|---|---|---|
+| `true`（默认） | 有 | 有 | 有 |
+| `false` | 无 | 有 | 有 |
+
+也就是说它只关"自动把检索结果塞进请求"，模型仍可能按常驻指令自行调用 `weknora_hub_search`。若要让模型也完全不看知识库，需要连常驻提示一起关（当前版本未提供该开关，按需改代码）。
+
+改配置后 DSH 会按需重读，无需重启；**改 `index.js` 必须重启**。热重读只更新同一个 wrapper 读取的配置，不会叠加多层注入。
 
 ## 自动检索
 

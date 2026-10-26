@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- 修 `auto.enabled` 在**热重读配置后不彻底**：每次 apply 都会在 `streamWithRegistration` 外面再套一层，旧层仍按它自己那份 `cfg` 继续注入，所以把开关设成 `false` 在重启前会继续注入、且多层叠加。现在每个 llm service 只保留一个 wrapper，配置重载只更新共享状态；被取代的实例 dispose 不再拆掉线上 seam。
+- 修缓存驱逐崩溃：`queryCache.keys().slice()` 对迭代器调 `slice` 会抛错，缓存超过 128 条后**每次新查询都静默跳过自动检索**（日志里的 `error: queryCache.keys.slice is not a function`）。改为先展开再切片。
+- 跳过原因写清楚：`auto.enabled=false` 与"没有 messages"不再共用同一条含混日志。
+
 ## 1.0.0
 
 - 首个版本：多源知识库统一入口
